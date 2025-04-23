@@ -1,0 +1,16 @@
+fastapi[all]>=0.100.0 # Includes pydantic, uvicorn, starlette etc.
+sqlalchemy[asyncio]>=2.0.0 # ORM, using asyncio extension
+aiomysql>=0.2.0         # Async MySQL driver (or asyncpg for PostgreSQL)
+passlib[bcrypt]>=1.7.4    # For password hashing
+python-jose[cryptography]>=3.3.0 # For JWT handling
+python-dotenv>=1.0.0     # For loading .env files
+email-validator>=2.0.0   # For validating email format in Pydantic models (optional but good)
+celery>=5.3.0           # For async tasks
+redis>=5.0.0            # For Celery broker/backend and caching
+gunicorn>=21.2.0        # WSGI server for production (alongside Uvicorn)
+
+# Optional for Excel import/export later
+openpyxl>=3.1.0
+pydantic~=2.11.3
+starlette~=0.46.2
+pydantic-settings~=2.9.1
