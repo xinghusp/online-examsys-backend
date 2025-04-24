@@ -8,6 +8,8 @@ from app.api import deps # Assuming deps.py will be created
 from app.core.security import create_access_token
 from app.core.config import settings
 
+from app.crud.crud_user import user as crud_user
+
 router = APIRouter()
 
 @router.post("/login/access-token", response_model=schemas.Token)
@@ -18,7 +20,7 @@ async def login_access_token(
     """
     OAuth2 compatible token login, get an access token for future requests.
     """
-    user = await crud.crud_user.CRUDUser.authenticate(
+    user = await crud_user.authenticate(
         db = db, username=form_data.username, password=form_data.password
     )
     if not user:
@@ -27,7 +29,7 @@ async def login_access_token(
             detail="Incorrect username or password",
             headers={"WWW-Authenticate": "Bearer"},
         )
-    elif not await crud.crud_user.CRUDUser.is_active(user):
+    elif not await crud_user.is_active(user):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Inactive user"

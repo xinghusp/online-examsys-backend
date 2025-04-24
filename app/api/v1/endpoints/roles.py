@@ -1,11 +1,13 @@
-from fastapi import APIRouter, Depends, HTTPException, status, Query
+from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.future import select
+from sqlalchemy.orm import selectinload, Session  # Import Session for type hint if needed in CRUD
 from typing import List, Any
 
 from app import crud, schemas
-from app.db import models
 from app.api import deps
-
+from app.db import models
+from app.crud.crud_role import role as crud_role
 router = APIRouter()
 
 @router.post("/", response_model=schemas.Role, status_code=status.HTTP_201_CREATED)
@@ -16,29 +18,57 @@ async def create_role(
     current_user: models.User = Depends(deps.get_current_active_admin)
 ) -> Any:
     """
-    Create new role with initial permissions. Requires admin privileges.
+    Create new role.
     """
-    try:
-        role = await crud.CRUDRole.create(db=db, obj_in=role_in)
-    except ValueError as e:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
-    except Exception as e:
-         # Log the exception e
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Error creating role")
-    return role
+    existing_role = await crud_role.get_by_name(db, name=role_in.name)
+    if existing_role:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Role with this name already exists",
+        )
+
+    # Assuming crud_role.create handles associating permission_ids if provided in role_in
+    created_role_db_obj = await crud_role.create(db=db, obj_in=role_in)
+    if not created_role_db_obj:
+         # Handle case where CRUD op might fail silently (though it should raise)
+         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to create role in database.")
+
+
+    # --- Eager Loading Fix ---
+    # Fetch the newly created role again, explicitly loading the permissions
+    stmt = select(models.Role).options(selectinload(models.Role.permissions)).where(models.Role.id == created_role_db_obj.id)
+    result = await db.execute(stmt)
+    role_with_permissions = result.scalar_one_or_none()
+
+    if not role_with_permissions:
+         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to retrieve created role with permissions.")
+
+    return role_with_permissions
+
 
 @router.get("/", response_model=List[schemas.Role])
 async def read_roles(
     db: AsyncSession = Depends(deps.get_db),
-    skip: int = Query(0, ge=0),
-    limit: int = Query(100, ge=1, le=200),
+    skip: int = 0,
+    limit: int = 100,
     current_user: models.User = Depends(deps.get_current_active_admin)
 ) -> Any:
     """
-    Retrieve roles. Includes assigned permissions. Requires admin privileges.
+    Retrieve roles. Load permissions eagerly.
     """
-    roles = await crud.CRUDRole.get_multi(db, skip=skip, limit=limit)
+    # TODO: Implement total count retrieval for pagination if not handled by CRUD
+    # Example: total_count = await crud_role.get_count(db)
+
+    # Using direct query with eager loading:
+    stmt = select(models.Role).options(selectinload(models.Role.permissions)).offset(skip).limit(limit).order_by(models.Role.id) # Add ordering
+    result = await db.execute(stmt)
+    roles = result.scalars().all()
+
+    # If your response model needs total, structure it like:
+    # return {"items": roles, "total": total_count}
+    # Adjust response_model accordingly (e.g., using a generic PaginatedResponse[schemas.Role])
     return roles
+
 
 @router.get("/{role_id}", response_model=schemas.Role)
 async def read_role(
@@ -47,17 +77,18 @@ async def read_role(
     current_user: models.User = Depends(deps.get_current_active_admin)
 ) -> Any:
     """
-    Get a specific role by ID, including permissions. Requires admin privileges.
+    Get a specific role by ID. Load permissions eagerly.
     """
-    role = await crud.CRUDRole.get(db, id=role_id)
+    stmt = select(models.Role).options(selectinload(models.Role.permissions)).where(models.Role.id == role_id)
+    result = await db.execute(stmt)
+    role = result.scalar_one_or_none()
+
     if not role:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Role not found",
-        )
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Role not found")
     return role
 
-@router.put("/{role_id}", response_model=schemas.Role)
+
+@router.put("/{role_id}", response_model=schemas.Role) # <<< --- ADDED BACK --- <<<
 async def update_role(
     *,
     db: AsyncSession = Depends(deps.get_db),
@@ -66,26 +97,41 @@ async def update_role(
     current_user: models.User = Depends(deps.get_current_active_admin)
 ) -> Any:
     """
-    Update a role. Can update name, description, and replace permissions.
-    Requires admin privileges.
+    Update a role.
     """
-    role = await crud.CRUDRole.get(db, id=role_id) # Get loads permissions too
-    if not role:
+    role_db_obj = await crud_role.get(db, id=role_id) # Fetch existing role first
+    if not role_db_obj:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Role not found",
         )
-    try:
-        updated_role = await crud.CRUDRole.update(db=db, db_obj=role, obj_in=role_in)
-    except ValueError as e:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
-    except Exception as e:
-        # Log the exception e
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Error updating role")
 
-    return updated_role
+    # Check for name conflict if name is being changed
+    if role_in.name and role_in.name != role_db_obj.name:
+        existing_role = await crud_role.get_by_name(db, name=role_in.name)
+        if existing_role and existing_role.id != role_id:
+            raise HTTPException(status_code=400, detail="Role with this name already exists.")
 
-@router.delete("/{role_id}", response_model=schemas.Role)
+    # Perform the update using CRUD
+    # Ensure crud_role.update handles permission_ids association correctly if they are in role_in
+    updated_role_db_obj = await crud_role.update(db=db, db_obj=role_db_obj, obj_in=role_in)
+    if not updated_role_db_obj:
+         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to update role in database.")
+
+
+    # --- Eager Loading Fix for Response ---
+    # Fetch the updated role again, explicitly loading the permissions
+    stmt = select(models.Role).options(selectinload(models.Role.permissions)).where(models.Role.id == updated_role_db_obj.id)
+    result = await db.execute(stmt)
+    role_with_permissions = result.scalar_one_or_none()
+
+    if not role_with_permissions:
+         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to retrieve updated role with permissions.")
+
+    return role_with_permissions
+
+
+@router.delete("/{role_id}", response_model=schemas.Role) # <<< --- ADDED BACK --- <<<
 async def delete_role(
     *,
     db: AsyncSession = Depends(deps.get_db),
@@ -93,65 +139,30 @@ async def delete_role(
     current_user: models.User = Depends(deps.get_current_active_admin)
 ) -> Any:
     """
-    Delete a role. Requires admin privileges.
-    Prevents deletion of 'System Admin' role.
-    (Note: Add check if role is assigned to users before deletion if needed).
+    Delete a role.
+    (Note: Consider adding checks if role is assigned to users before deletion).
     """
-    try:
-        deleted_role = await crud.CRUDRole.remove(db=db, id=role_id)
-        if not deleted_role:
-             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Role not found")
-    except ValueError as e: # Catch error from CRUD (e.g., trying to delete admin)
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
-    except Exception as e:
-         # Log the exception e
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Error deleting role")
+    role = await crud_role.get(db=db, id=role_id)
+    if not role:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Role not found")
 
-    return deleted_role
+    # Optional: Check if role is assigned to any user before deleting
+    # stmt = select(models.User).join(models.user_roles).where(models.user_roles.c.role_id == role_id).limit(1)
+    # result = await db.execute(stmt)
+    # if result.scalar_one_or_none():
+    #     raise HTTPException(status_code=400, detail="Cannot delete role assigned to users. Unassign users first.")
 
-# --- Endpoint to assign roles to a user ---
-# This could also live in users.py, but placing here keeps role logic together
-@router.put("/assign-to-user/{user_id}", response_model=schemas.User) # Return the updated user
-async def assign_roles_to_user(
-    user_id: int,
-    *,
-    db: AsyncSession = Depends(deps.get_db),
-    roles_in: schemas.UserAssignRoles,
-    current_user: models.User = Depends(deps.get_current_active_admin) # Admin required
-) -> Any:
-    """
-    Assign roles to a specific user, replacing their current roles.
-    Requires admin privileges.
-    """
-    user_to_update = await crud.CRUDUser.get(db=db, id=user_id) # Fetch user
-    if not user_to_update:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+    # --- Eager Loading before Deletion (if response_model needs it) ---
+    # Fetch with permissions loaded *before* deleting, so the returned object is complete
+    stmt_load = select(models.Role).options(selectinload(models.Role.permissions)).where(models.Role.id == role_id)
+    result_load = await db.execute(stmt_load)
+    role_to_delete_loaded = result_load.scalar_one() # Use scalar_one as we know it exists
 
-    # Prevent admin from removing their own admin role?
-    if user_to_update.id == current_user.id:
-        admin_role_id = None
-        current_admin_role = await crud.CRUDRole.get_by_name(db, name="System Admin")
-        if current_admin_role:
-            admin_role_id = current_admin_role.id
-        if admin_role_id and admin_role_id not in roles_in.role_ids:
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Admin cannot remove their own System Admin role.")
+    # Perform deletion
+    deleted_role = await crud_role.remove(db=db, id=role_id)
+    if not deleted_role:
+         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to delete role.")
 
-    try:
-        updated_user = await crud.CRUDRole.assign_roles_to_user(db=db, user=user_to_update, role_ids=roles_in.role_ids)
-    except Exception as e:
-        # Log e
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Error assigning roles to user")
 
-    # Need to load roles for the response model (schemas.User doesn't include them by default)
-    # We might need a UserWithRoles schema or adjust the crud.role.assign_roles_to_user return/refresh logic
-    # For now, return the user object which *should* have roles loaded due to refresh in CRUD
-    # Re-fetch user with roles loaded to be safe for response model
-    user_with_roles = await crud.CRUDUser.get(db=db, id=user_id) # crud.user.get doesn't load roles by default...
-    # Let's modify crud.user.get to optionally load roles, or create a specific function
-    # Quick fix: reload here (not ideal)
-    await db.refresh(user_with_roles, attribute_names=['roles'])
-    # Now create the response model. We need a User schema that includes roles.
-    # Let's define UserWithRoles in schemas/user.py
-    # Assuming UserWithRoles schema exists: return schemas.UserWithRoles.from_orm(user_with_roles)
-    # If not, just return the basic user schema for now:
-    return schemas.User.model_validate(user_with_roles) # Validate against basic User schema
+    # Return the *loaded* object data before it was deleted
+    return role_to_delete_loaded

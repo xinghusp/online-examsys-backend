@@ -17,7 +17,7 @@ class Settings(BaseSettings):
     DB_PORT: int = int(os.getenv("DB_PORT", 3306))
     DB_USER: str = os.getenv("DB_USER", "root")
     DB_PASSWORD: str = os.getenv("DB_PASSWORD", "123456")
-    DB_NAME: str = os.getenv("DB_NAME", "ExamSys_2025_db")
+    DB_NAME: str = os.getenv("DB_NAME", "ExamSys_2025_Db")
 
     # Asynchronous SQLAlchemy database URL
     # Note: For aiomysql, ensure the database exists before connecting

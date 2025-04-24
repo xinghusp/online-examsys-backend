@@ -6,11 +6,13 @@ from typing import Any, Dict, Optional, Union, List, Tuple
 
 from app.core import security
 from app.core.security import get_password_hash, verify_password
+from app.crud.base import CRUDBase
 from app.db import models
 from app.db.models import User # Import the User model correctly
-from app.schemas.user import UserCreate, UserUpdate, UserImportRecord, UserStatus  # Import Pydantic schemas
+from app.db.models.user import UserStatus
+from app.schemas.user import UserCreate, UserUpdate  # Import Pydantic schemas
 
-class CRUDUser:
+class CRUDUser(CRUDBase[models.User, UserCreate, UserUpdate]):
     async def get(self, db: AsyncSession, *, id: int) -> Optional[User]:
         """Get a user by ID."""
         result = await db.execute(select(User).filter(User.id == id))
@@ -49,6 +51,20 @@ class CRUDUser:
         await db.refresh(db_obj)
         return db_obj
 
+    async def create_with_roles(self, db: AsyncSession, *, obj_in: UserCreate, roles: List[models.Role]) -> models.User:
+        db_obj_data = obj_in.model_dump(exclude={"password", "role_ids"})
+        db_obj_data["password_hash"] = get_password_hash(obj_in.password)
+        db_obj = self.model(**db_obj_data)
+        db_obj.roles = roles
+        db.add(db_obj)
+        await db.commit()
+        await db.refresh(db_obj)
+        # Optional: Eager load roles for the returned object if needed immediately after create
+        # stmt = select(models.User).options(selectinload(models.User.roles)).where(models.User.id == db_obj.id)
+        # result = await db.execute(stmt)
+        # return result.scalar_one()
+        return db_obj
+
     async def update(
         self, db: AsyncSession, *, db_obj: User, obj_in: Union[UserUpdate, Dict[str, Any]]
     ) -> User:
@@ -73,6 +89,49 @@ class CRUDUser:
         await db.commit()
         await db.refresh(db_obj)
         return db_obj
+
+    async def update_with_roles(
+        self,
+        db: AsyncSession,
+        *,
+        db_obj: models.User,
+        obj_in: Union[UserUpdate, Dict[str, Any]],
+        roles: Optional[List[models.Role]] # Pass Role objects, None means don't change roles
+    ) -> models.User:
+        # Prepare update data for scalar fields
+        if isinstance(obj_in, dict):
+            update_data = obj_in
+        else:
+            # Exclude role_ids as we handle roles separately
+            update_data = obj_in.model_dump(exclude_unset=True, exclude={"role_ids"})
+
+        # Handle password update specifically before calling super().update
+        if update_data.get("password"):
+            hashed_password = get_password_hash(update_data["password"])
+            update_data["password_hash"] = hashed_password # Add hashed password
+            del update_data["password"] # Remove plain password
+        elif "password" in update_data:
+             # Explicitly remove password if passed as None or empty string
+             # to prevent it being passed to super().update
+             del update_data["password"]
+
+        # Call the working super().update for scalar fields
+        # Pass only the prepared update_data dictionary
+        updated_db_obj = await super().update(db, db_obj=db_obj, obj_in=update_data)
+
+        # Update roles relationship if roles list is provided (not None)
+        if roles is not None:
+            await db.refresh(updated_db_obj, ["roles"])  # Explicitly load roles first
+            if roles is not None:
+                updated_db_obj.roles = roles  # Now safe to assign
+
+        db.add(updated_db_obj) # Add to session again (might be redundant depending on super().update)
+        await db.commit()
+        await db.refresh(updated_db_obj)
+        # Optional: Eager load roles for the returned object
+        # await db.refresh(updated_db_obj, attribute_names=['roles'])
+        return updated_db_obj
+
 
     async def authenticate(
         self, db: AsyncSession, *, username: str, password: str
@@ -99,122 +158,6 @@ class CRUDUser:
             await db.commit()
         return obj # Return the deleted object or None
 
-    async def bulk_create(
-            self, db: AsyncSession, *, users_in: List[UserImportRecord]
-    ) -> Tuple[int, List[Dict[str, Any]]]:
-        """
-        Creates multiple users in bulk.
-
-        Args:
-            db: The database session.
-            users_in: A list of UserImportRecord schema objects.
-
-        Returns:
-            A tuple containing:
-                - success_count: Number of users successfully created.
-                - errors: A list of dictionaries detailing failed creations (e.g., {'username': '...', 'error': '...'}).
-        """
-        success_count = 0
-        errors: List[Dict[str, Any]] = []
-        created_users = []  # Store successfully created user objects temporarily
-
-        # Optional: Pre-fetch existing roles/groups if assigning during import
-        all_role_names = set(r_name for u in users_in if u.role_names for r_name in u.role_names)
-        all_group_names = set(g_name for u in users_in if u.group_names for g_name in u.group_names)
-        roles_map: Dict[str, models.Role] = {}
-        groups_map: Dict[str, models.Group] = {}
-
-        if all_role_names:
-            roles_db = await db.execute(select(models.Role).filter(models.Role.name.in_(all_role_names)))
-            roles_map = {role.name: role for role in roles_db.scalars().all()}
-        if all_group_names:
-            groups_db = await db.execute(select(models.Group).filter(models.Group.name.in_(all_group_names)))
-            groups_map = {group.name: group for group in groups_db.scalars().all()}
-
-        for idx, user_data in enumerate(users_in):
-            hashed_password = security.get_password_hash(user_data.password)
-            db_obj = models.User(
-                username=user_data.username,
-                id_number=user_data.id_number,
-                full_name=user_data.fullname,
-                password_hash=hashed_password,
-                status=UserStatus.active
-            )
-
-            # Prepare roles and groups if provided
-            user_roles = []
-            user_groups = []
-            role_errors = []
-            group_errors = []
-
-            if user_data.role_names:
-                for r_name in user_data.role_names:
-                    role = roles_map.get(r_name)
-                    if role:
-                        user_roles.append(role)
-                    else:
-                        role_errors.append(f"Role '{r_name}' not found")
-            if user_data.group_names:
-                for g_name in user_data.group_names:
-                    group = groups_map.get(g_name)
-                    if group:
-                        user_groups.append(group)
-                    else:
-                        group_errors.append(f"Group '{g_name}' not found")
-
-            if role_errors or group_errors:
-                errors.append({
-                    "row": idx + 2,  # Assuming header is row 1, data starts row 2
-                    "username": user_data.username,
-                    "error": ", ".join(role_errors + group_errors)
-                })
-                continue  # Skip adding this user
-
-            # Add roles/groups to the user object before adding to session
-            db_obj.roles = user_roles
-            db_obj.groups = user_groups
-
-            db.add(db_obj)
-            try:
-                # Flush to catch potential IntegrityErrors (like duplicate username/email) early within the loop
-                await db.flush([db_obj])
-                created_users.append(db_obj)  # Add to list for potential commit later
-                success_count += 1
-            except IntegrityError as e:
-                await db.rollback()  # Rollback the failed flush for this user
-                error_detail = "Username or email already exists."
-                # You could try to parse e.orig for more specific details, but it's DB-dependent
-                errors.append({
-                    "row": idx + 2,
-                    "username": user_data.username,
-                    "error": error_detail
-                })
-            except Exception as e:
-                await db.rollback()  # Rollback on other unexpected errors
-                errors.append({
-                    "row": idx + 2,
-                    "username": user_data.username,
-                    "error": f"An unexpected error occurred: {e}"
-                })
-
-        # If we successfully flushed users, commit them all at the end
-        if created_users:
-            try:
-                await db.commit()
-                # Optional: Refresh created users if needed elsewhere, but usually not necessary after bulk create
-                # for user in created_users:
-                #     await db.refresh(user)
-            except Exception as e:
-                # This commit might fail if there was a deferred constraint or other issue.
-                await db.rollback()
-                # Need to adjust success_count and errors if the final commit fails
-                # For simplicity now, assume commit succeeds if flush worked. More robust handling might be needed.
-                print(f"CRITICAL: Final commit failed after successful flushes in bulk user create: {e}")
-                # Mark all 'created_users' as failed in this scenario?
-                final_commit_error = {"row": "N/A", "username": "Multiple Users", "error": f"Final commit failed: {e}"}
-                return 0, errors + [final_commit_error]  # Return 0 success and add a general error
-
-        return success_count, errors
 
 # Instantiate the CRUD object for easy import
-user = CRUDUser()
+user = CRUDUser(models.User)

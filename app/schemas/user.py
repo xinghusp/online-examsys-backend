@@ -1,105 +1,77 @@
-from pydantic import BaseModel, Field, ConfigDict, field_validator, EmailStr
-from typing import Optional, List, Dict, Any
+from pydantic import BaseModel, EmailStr, ConfigDict, field_validator
+from typing import Optional, List
 from datetime import datetime
-import enum
 
-# Re-use or define the enum here as well for validation
-class UserStatus(str, enum.Enum):
-    active = "active"
-    disabled = "disabled"
+# Assuming schemas.role.Role and schemas.permission.Permission are defined elsewhere
+# and have the necessary 'from_attributes=True' config
+from .role import Role
 
-# Base properties shared by other schemas
+# Base properties - align with DB columns where possible
 class UserBase(BaseModel):
-    username: str = Field(..., min_length=3, max_length=100, description="Unique username for login")
-    id_number: Optional[str] = Field(None, max_length=50, description="Optional ID number (unique if provided)")
-    full_name: Optional[str] = Field(None, max_length=100, description="Optional full name")
-    status: UserStatus = Field(UserStatus.active, description="User status")
+    username: str
+    full_name: Optional[str] = None # DB uses full_name, handle mapping if needed
+    id_number: Optional[str] = None
+    status: Optional[str] = 'active' # Use status string, default to 'active'
 
-    model_config = ConfigDict(
-        from_attributes=True, # Allow creating schema from ORM model
-        # Pydantic v2 uses 'json_schema_extra' for examples
-        json_schema_extra={
-            "example": {
-                "username": "johndoe",
-                "id_number": "S12345",
-                "full_name": "John Doe",
-                "status": "active",
-            }
-        }
-    )
-
-# Properties required for user creation
+# Properties to receive via API on creation
 class UserCreate(UserBase):
-    password: str = Field(..., min_length=8, description="User password (will be hashed)")
+    password: str
+    role_ids: Optional[List[int]] = []
+    # Map fullname if API receives it but DB expects full_name
+    # fullname: Optional[str] = Field(None, alias='full_name')
 
-    @field_validator('username')
-    @classmethod
-    def username_alphanumeric(cls, v):
-        assert v.isalnum(), 'Username must be alphanumeric'
-        return v
+# Properties to receive via API on update
+class UserUpdate(UserBase):
+    password: Optional[str] = None
+    role_ids: Optional[List[int]] = None
+    # Map fullname if API receives it but DB expects full_name
+    # fullname: Optional[str] = Field(None, alias='full_name')
 
-    model_config = ConfigDict(
-         json_schema_extra={
-            "example": {
-                "username": "newuser",
-                "password": "SecurePassword123",
-                "id_number": "EMP007",
-                "full_name": "Jane Smith",
-                "status": "active",
-            }
-        }
-    )
+# Schema for user import row data
+class UserImportRecord(BaseModel):
+    username: str
+    password: str
+    full_name: Optional[str] = None # Use fullname here as it matches excel_processor
+    role_names: Optional[List[str]] = []
+    group_names: Optional[List[str]] = []
 
+    @field_validator('username', 'password', check_fields=False) # Pydantic v1 syntax
+    def required_fields_not_empty(cls, v: str):
+        if not v or not v.strip():
+            raise ValueError('Username and Password cannot be empty')
+        return v.strip()
 
-# Properties required for user update
-class UserUpdate(BaseModel):
-    username: Optional[str] = Field(None, min_length=3, max_length=100)
-    password: Optional[str] = Field(None, min_length=8, description="New password (if changing)")
-    id_number: Optional[str] = Field(None, max_length=50)
-    full_name: Optional[str] = Field(None, max_length=100)
-    status: Optional[UserStatus] = None
+    @field_validator('email', 'fullname', check_fields=False) # Pydantic v1 syntax
+    def strip_optional_strings(cls, v: Optional[str]):
+        return v.strip() if v else None
 
-    model_config = ConfigDict(
-         json_schema_extra={
-            "example": {
-                "full_name": "Johnathan Doe",
-                "status": "disabled",
-            }
-        }
-    )
-
-# Properties stored in DB (used internally, not directly in API response unless needed)
+# Properties shared by models stored in DB - base for response
 class UserInDBBase(UserBase):
     id: int
-    created_at: datetime
-    updated_at: datetime
+    # Use full_name if that's what the ORM model attribute is named
+    full_name: Optional[str] = None # Align with DB column name used by ORM
+    status: str # Status is NOT NULL in DB
 
-# Properties to return to client (omits password hash)
+    # Pydantic v2 config
+    model_config = ConfigDict(from_attributes=True)
+    # Pydantic v1 config (use one or the other)
+    # class Config:
+    #     orm_mode = True
+
+# Properties to return to client (response_model)
 class User(UserInDBBase):
-    pass # Inherits all from UserInDBBase for now
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+    roles: Optional[List[Role]] = [] # Role schema needs permissions loaded
 
-# Schema for user login
-class UserLogin(BaseModel):
-    username: str # Or potentially allow login via id_number + full_name later
-    password: str
+    # Config inherited or add explicitly
 
-    model_config = ConfigDict(
-         json_schema_extra={
-            "example": {
-                "username": "testuser",
-                "password": "password123"
-            }
-        }
-    )
-# --- Schema for User record in Bulk Import ---
-class UserImportRecord(BaseModel):
-    username: str = Field(..., description="Username (must be unique)")
-    id_number: Optional[str] = Field(None, description="ID Number (must be unique if provided)")
-    fullname: Optional[str] = Field(None, max_length=255, description="User's full name")
-    password: str = Field(..., description="User's initial password (will be hashed)")
+# Properties stored in DB (including sensitive fields)
+class UserInDB(UserInDBBase):
+    password_hash: str # Align with DB column name used by ORM
 
-# --- Schema for Bulk Import Response ---
-class UserBulkImportResponse(BaseModel):
-    success_count: int = 0
-    failed_count: int = 0
-    errors: List[Dict[str, Any]] = Field([], description="List of errors encountered (e.g., row number, error message)")
+# Bulk import response schema
+class BulkImportResponse(BaseModel):
+    success_count: int
+    failed_count: int
+    errors: Optional[List[dict]] = None

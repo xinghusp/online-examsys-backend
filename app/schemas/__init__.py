@@ -1,5 +1,5 @@
 from .token import Token, TokenPayload
-from .user import User, UserCreate, UserUpdate
+from .user import User, UserCreate, UserUpdate, BulkImportResponse
 from .permission import Permission,PermissionCreate,PermissionUpdate
 from .role import Role,RoleCreate,RoleUpdate,UserAssignRoles
 from .group import Group,GroupCreate,GroupUpdate,GroupAssignUsers

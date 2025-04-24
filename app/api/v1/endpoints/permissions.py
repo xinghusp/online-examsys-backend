@@ -6,6 +6,8 @@ from app import crud, schemas
 from app.api import deps
 from app.db import models
 
+from app.crud.crud_permission import permission as crud_permission
+
 router = APIRouter()
 
 # Endpoint to list permissions (usually sufficient)
@@ -19,7 +21,7 @@ async def read_permissions(
     """
     Retrieve all permissions. Requires admin privileges.
     """
-    permissions = await crud.CRUDPermission.get_multi(db, skip=skip, limit=limit)
+    permissions = await crud_permission.get_multi(db, skip=skip, limit=limit)
     return permissions
 
 # Optional: Endpoint to create a permission (maybe restrict this in production)
@@ -34,13 +36,13 @@ async def create_permission(
     Create a new permission. Requires admin privileges.
     (Use with caution, consider if dynamic permission creation is needed).
     """
-    existing_permission = await crud.CRUDPermission.get_by_code(db, code=permission_in.code)
+    existing_permission = await crud_permission.get_by_code(db, code=permission_in.code)
     if existing_permission:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Permission code '{permission_in.code}' already exists.",
         )
-    permission = await crud.CRUDPermission.create(db=db, obj_in=permission_in)
+    permission = await crud_permission.create(db=db, obj_in=permission_in)
     return permission
 
 # Optional: Endpoint to get a single permission
@@ -53,7 +55,7 @@ async def read_permission(
     """
     Get a specific permission by ID. Requires admin privileges.
     """
-    permission = await crud.CRUDPermission.get(db, id=permission_id)
+    permission = await crud_permission.get(db, id=permission_id)
     if not permission:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -73,13 +75,13 @@ async def update_permission(
     """
     Update a permission (e.g., description). Requires admin privileges.
     """
-    permission = await crud.CRUDPermission.get(db, id=permission_id)
+    permission = await crud_permission.get(db, id=permission_id)
     if not permission:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Permission not found",
         )
-    updated_permission = await crud.CRUDPermission.update(db=db, db_obj=permission, obj_in=permission_in)
+    updated_permission = await crud_permission.update(db=db, db_obj=permission, obj_in=permission_in)
     return updated_permission
 
 # Optional: Endpoint to delete a permission (Use with extreme caution)

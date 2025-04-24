@@ -13,7 +13,8 @@ from app import crud
 from app.core import security
 from app.core.config import settings
 from app.db.database import AsyncSessionFactory
-from app.schemas.user import User
+from app.db.models import User
+from app.crud.crud_user import user as crud_user
 
 reusable_oauth2 = OAuth2PasswordBearer(
     tokenUrl=f"{settings.API_V1_STR}/login/access-token"
@@ -63,7 +64,7 @@ async def get_current_active_user(
     Dependency to get the current active user.
     Raises HTTPException if the user is inactive.
     """
-    if not await crud.CRUDUser.is_active(current_user):
+    if not await crud_user.is_active(current_user):
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Inactive user")
     return current_user
 
